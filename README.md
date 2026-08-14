@@ -8,7 +8,7 @@
 python -m pip install -r requirements.txt
 ```
 
-有限训练（推荐先这样验证）：
+有限训练：
 
 ```bash
 python train_cloud.py --output-dir /persistent/ai-model --max-epochs 1000
