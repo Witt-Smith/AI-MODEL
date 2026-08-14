@@ -1,24 +1,24 @@
-
-import pandas as pd
+import argparse
 import torch
-from color import GREEN
+from color import BLUE, GREEN
+from config import Config
 from data_provider import DataProvider, LoadingMethod
-from train import DataSet, Train
+from train import Train
 from time import sleep
-import lightning as L
 from pathlib import Path
-from lightning.pytorch.loggers import CSVLogger
-from lightning.pytorch.callbacks import ModelCheckpoint
-from log import Log
-from color import GREEN, YELLOW, BLUE, PURPLE, CYAN, RESET
 from tokenizer import Tokenizer
-from time import sleep
 
 
 
 class Chat(Train):
-    def __init__(self, vocab_size: int, pad_id: int, tokenizer: Tokenizer):
-        super().__init__(vocab_size, pad_id, tokenizer)
+    def __init__(
+        self,
+        vocab_size: int,
+        pad_id: int,
+        tokenizer: Tokenizer,
+        learning_rate: float = 0.002,
+    ):
+        super().__init__(vocab_size, pad_id, tokenizer, learning_rate)
 
     def generate(self,question: str,eos_id: int,bos_id: int) -> torch.Tensor:
         ''' Generate a response to the given question '''
@@ -67,8 +67,14 @@ class Chat(Train):
     def begin_chat(self)-> None:
         self.eval()
 
-        for _ in range(10):
-            q = input(GREEN + "You: ")
+        while True:
+            try:
+                q = input(GREEN + "You (输入 exit 退出): ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if q.strip().lower() in {"exit", "quit", "退出"}:
+                break
             generated_ids = self.generate(
                 q,
                 self.tokenizer.SPECIAL_TOKEN["<EOS>"],
@@ -84,20 +90,53 @@ class Chat(Train):
             sleep(0.05)
         print()
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Chat with a trained AI-MODEL checkpoint.")
+    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "runs")
+    parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument("--dataset-name", default="silver/lccc")
+    parser.add_argument("--max-dialogs", type=int, default=10_000)
+    parser.add_argument("--max-sequence-length", type=int, default=64)
+    args = parser.parse_args()
+
+    config = Config(output_dir=args.output_dir.expanduser().resolve())
+    checkpoint_path = (
+        args.checkpoint.expanduser().resolve()
+        if args.checkpoint is not None
+        else config.checkpoint_dir / "last.ckpt"
+    )
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint does not exist: {checkpoint_path}")
+    if not config.vocabulary_path.is_file():
+        raise FileNotFoundError(f"Vocabulary does not exist: {config.vocabulary_path}")
+    if not config.word2vec_path.is_file():
+        raise FileNotFoundError(f"Word2Vec model does not exist: {config.word2vec_path}")
+
+    data_provider = DataProvider(
+        args.dataset_name,
+        LoadingMethod.PATH,
+        max_dialogs=args.max_dialogs,
+    )
+    tokenizer = Tokenizer(
+        data_provider,
+        is_new_dataset=False,
+        max_sequence_length=args.max_sequence_length,
+        vocabulary_path=config.vocabulary_path,
+        word2vec_path=config.word2vec_path,
+        allow_vocabulary_updates=False,
+    )
+    model = Chat(
+        vocab_size=len(tokenizer.TRAIN_VOCABULARY),
+        pad_id=tokenizer.SPECIAL_TOKEN["<PAD>"],
+        tokenizer=tokenizer,
+    )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    model.load_state_dict(checkpoint["state_dict"])
+    model.begin_chat()
+
+
 if __name__ == "__main__":
-    logger = CSVLogger(r'/Users/wittsmith/Desktop/AI-MODEL/logs',"train_log")
-    log = Log(path = Path(logger.log_dir) / "metrics.csv")
-    checkpoint_dir = Path(r"/Users/wittsmith/Desktop/AI-MODEL/checkpoints/last.ckpt")
-    last_checkpoint = checkpoint_dir / "last.ckpt"
-    callback = ModelCheckpoint(dirpath = checkpoint_dir,save_last = True)
-    trainer = L.Trainer(max_epochs = 1000,logger = logger,log_every_n_steps = 1,callbacks = callback)
-    data_provider = DataProvider(r"silver/lccc", LoadingMethod.PATH, max_dialogs = 10_000)
-    tokenizer = Tokenizer(data_provider,False,max_sequence_length = 64)
-    dataset = DataSet(tokenizer = tokenizer)
-    train = Chat(vocab_size = len(tokenizer.TRAIN_VOCABULARY), pad_id = tokenizer.SPECIAL_TOKEN["<PAD>"], tokenizer = tokenizer)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size = 4, shuffle = True,num_workers = 0,collate_fn = dataset.collate_fn)
-    trainer.fit(train,dataloader,ckpt_path = last_checkpoint if last_checkpoint.exists() else None)
-    train.begin_chat()
+    main()
     
 
     

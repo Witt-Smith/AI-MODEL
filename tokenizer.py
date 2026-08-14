@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Optional
 
 from jieba import cut
 
@@ -13,24 +14,28 @@ class Tokenizer(WordVec):
     def __init__(
         self,
         data_provider: DataProvider,
-        is_new_dataset: bool,
         max_sequence_length: int = 64,
+        vocabulary_path: Optional[Path] = None,
+        word2vec_path: Optional[Path] = None,
+        allow_vocabulary_updates: bool = True,
     ):
         if max_sequence_length < 3:
             raise ValueError("max_sequence_length must be at least 3")
 
-        super().__init__(data_provider)
+        super().__init__(data_provider, model_path=word2vec_path)
         self.SPECIAL_TOKEN = {
             "<PAD>": 0,
             "<UNK>": 1,
             "<BOS>": 2,
             "<EOS>": 3,
         }
-        self.IS_NEW_DATASET = is_new_dataset
         self.MAX_SEQUENCE_LENGTH = max_sequence_length
-        self.VOCABULARY_PATH = Path(
-            "/Users/wittsmith/Desktop/AI-MODEL/data/vocabulary.json"
+        self.VOCABULARY_PATH = (
+            Path(vocabulary_path)
+            if vocabulary_path is not None
+            else Path(__file__).resolve().parent / "data" / "vocabulary.json"
         )
+        self.ALLOW_VOCABULARY_UPDATES = allow_vocabulary_updates
         self.build_vocabulary()
         self.TRAIN_VOCABULARY: dict[str, int] = self.read_vocabulary()
 
@@ -40,12 +45,17 @@ class Tokenizer(WordVec):
     def build_vocabulary(self) -> None:
         vocabulary = dict(self.SPECIAL_TOKEN)
 
-        if self.IS_NEW_DATASET and self.VOCABULARY_PATH.exists():
+        if self.VOCABULARY_PATH.exists():
             self.VOCABULARY_PATH.unlink()
 
         if self.VOCABULARY_PATH.exists() and self.VOCABULARY_PATH.stat().st_size > 0:
             with self.VOCABULARY_PATH.open(mode="r", encoding="utf-8") as file:
                 vocabulary = json.load(file)
+
+        if not self.ALLOW_VOCABULARY_UPDATES:
+            self.SPECIAL_TOKEN = vocabulary
+            self.validate_vocabulary(vocabulary)
+            return
 
         tokens = set(self.WORD2VEC.wv.key_to_index)
 
@@ -54,7 +64,25 @@ class Tokenizer(WordVec):
                 vocabulary[token] = len(vocabulary)
 
         self.SPECIAL_TOKEN = vocabulary
+        self.validate_vocabulary(vocabulary)
         self.write_vocabulary()
+
+    def validate_vocabulary(self, vocabulary: dict[str, int]) -> None:
+        for token, expected_id in {
+            "<PAD>": 0,
+            "<UNK>": 1,
+            "<BOS>": 2,
+            "<EOS>": 3,
+        }.items():
+            if vocabulary.get(token) != expected_id:
+                raise ValueError(
+                    f"Invalid special-token ID for {token}: "
+                    f"expected {expected_id}, got {vocabulary.get(token)}"
+                )
+
+        token_ids = sorted(vocabulary.values())
+        if token_ids != list(range(len(vocabulary))):
+            raise ValueError("Vocabulary IDs must be unique and contiguous")
 
     def read_vocabulary(self) -> dict[str, int]:
         with self.VOCABULARY_PATH.open(mode="r", encoding="utf-8") as file:

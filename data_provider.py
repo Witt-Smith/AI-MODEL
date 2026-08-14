@@ -1,5 +1,6 @@
 from enum import Enum
 from functools import lru_cache
+from typing import Optional
 
 from datasets import DatasetDict, load_dataset
 from jieba import cut
@@ -15,16 +16,23 @@ class DataProvider:
 
     def __init__(
         self,
-        src: str,
+        dataset: str,
         loading_method: LoadingMethod,
         max_dialogs: int = 10_000,
     ):
         if max_dialogs <= 0:
             raise ValueError("max_dialogs must be greater than 0")
 
-        self.ds = load_dataset(src, "base")
+        self.dataset = dataset
+        self._ds: Optional[DatasetDict] = None
         self.Loading_method = loading_method
         self.max_dialogs = max_dialogs
+
+    @property
+    def ds(self) -> DatasetDict:
+        if self._ds is None:
+            self._ds = load_dataset(self.dataset, "base")
+        return self._ds
 
     @staticmethod
     def clean_turn(text: str) -> str:

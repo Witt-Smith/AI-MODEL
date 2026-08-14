@@ -5,21 +5,38 @@ from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 from numpy import ones
 import numpy as np
+from pathlib import Path
+from typing import Optional
 
 class WordVec():    
     ''' A class for handling word vector operations '''
 
     
-    def __init__(self, data_provider: DataProvider):
+    def __init__(
+        self,
+        data_provider: DataProvider,
+        model_path: Optional[Path] = None,
+    ):
         self.DATA_PROVIDER = data_provider
-        self.WORD2VEC = Word2Vec(
-            self.DATA_PROVIDER.load_word_data(),
-            vector_size = 128,
-            min_count = 2,
-            workers = 1 ,
-            alpha = 0.002,
-            epochs = 20
-        )
+        self.WORD2VEC_PATH = Path(model_path) if model_path is not None else None
+        if self.WORD2VEC_PATH is not None and self.WORD2VEC_PATH.is_file():
+            self.WORD2VEC = Word2Vec.load(str(self.WORD2VEC_PATH))
+        else:
+            self.WORD2VEC = Word2Vec(
+                self.DATA_PROVIDER.load_word_data(),
+                vector_size = 128,
+                min_count = 2,
+                workers = 1 ,
+                alpha = 0.002,
+                epochs = 20
+            )
+            if self.WORD2VEC_PATH is not None:
+                self.WORD2VEC_PATH.parent.mkdir(parents=True, exist_ok=True)
+                self.WORD2VEC.save(str(self.WORD2VEC_PATH))
+        if self.WORD2VEC.vector_size != 128:
+            raise ValueError(
+                f"Word2Vec vector size must be 128, got {self.WORD2VEC.vector_size}"
+            )
         self.PCA = PCA(n_components = 2)
 
     def train(self, train_file: str)-> None:

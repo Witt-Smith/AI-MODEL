@@ -1,27 +1,29 @@
-from sympy import im
 import torch
 import torch.nn as nn
 import lightning as L
-import pandas as pd
-from pathlib import Path
-from lightning.pytorch.loggers import CSVLogger
-from lightning.pytorch.callbacks import ModelCheckpoint
-from log import Log
-from color import GREEN, YELLOW, BLUE, PURPLE, CYAN, RESET
 from tokenizer import Tokenizer
 from torch.nn.utils.rnn import pad_sequence
 from torch.nn.utils.rnn import pack_padded_sequence
-from wordvec import WordVec
+from torch.utils.data import Dataset
 
 class Train(L.LightningModule):
-    def __init__(self,vocab_size: int, pad_id: int, tokenizer: Tokenizer):
+    def __init__(
+        self,
+        vocab_size: int,
+        pad_id: int,
+        tokenizer: Tokenizer,
+        learning_rate: float = 0.002,
+    ):
         super().__init__()
+        self.save_hyperparameters(ignore=["tokenizer"])
         self.tokenizer = tokenizer
+        self.learning_rate = learning_rate
         self.loss_fn = nn.CrossEntropyLoss(ignore_index = pad_id)
         self.linear = nn.Linear(in_features = 128, out_features = vocab_size, bias = True)
         self.embedding = nn.Embedding.from_pretrained(
             self.tokenizer.get_vector(self.tokenizer.TRAIN_VOCABULARY),
-            freeze=True
+            freeze=True,
+            padding_idx=pad_id,
         )
 
         self.encoder = nn.GRU(
@@ -57,6 +59,14 @@ class Train(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x,y,question_lengths = batch
+        if x.dtype != torch.long or y.dtype != torch.long:
+            raise TypeError("question_ids and answer_ids must use torch.long")
+        if x.min() < 0 or y.min() < 0:
+            raise ValueError("token IDs cannot be negative")
+        if x.max() >= self.embedding.num_embeddings:
+            raise ValueError("question token ID is outside the vocabulary")
+        if y.max() >= self.embedding.num_embeddings:
+            raise ValueError("answer token ID is outside the vocabulary")
         # 标签分离
         decoder_input_ids = y[:, :-1]
         labels = y[:, 1:]
@@ -93,13 +103,13 @@ class Train(L.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(
             params = self.parameters(),
-            lr = 0.002,
+            lr = self.learning_rate,
         )
     
 
 
 
-class DataSet():
+class DataSet(Dataset):
     def __init__(self,tokenizer: Tokenizer):
         self.tokenizer = tokenizer
         # 包含question and answer的问题.
