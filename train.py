@@ -1,10 +1,11 @@
+import lightning as L
 import torch
 import torch.nn as nn
-import lightning as L
-from tokenizer import Tokenizer
-from torch.nn.utils.rnn import pad_sequence
-from torch.nn.utils.rnn import pack_padded_sequence
+from torch.nn.utils.rnn import pack_padded_sequence, pad_sequence
 from torch.utils.data import Dataset
+
+from tokenizer import Tokenizer
+
 
 class Train(L.LightningModule):
     def __init__(
@@ -15,31 +16,51 @@ class Train(L.LightningModule):
         learning_rate: float = 0.002,
     ):
         super().__init__()
+        tokenizer_vocabulary_size = len(tokenizer.token_to_id)
+        if vocab_size != tokenizer_vocabulary_size:
+            raise ValueError(
+                "vocab_size must match the tokenizer vocabulary: "
+                f"model={vocab_size}, tokenizer={tokenizer_vocabulary_size}"
+            )
+        if pad_id < 0 or pad_id >= vocab_size:
+            raise ValueError("pad_id must be inside the vocabulary")
+        if learning_rate <= 0:
+            raise ValueError("learning_rate must be greater than 0")
+
         self.save_hyperparameters(ignore=["tokenizer"])
         self.tokenizer = tokenizer
         self.learning_rate = learning_rate
-        self.loss_fn = nn.CrossEntropyLoss(ignore_index = pad_id)
-        self.linear = nn.Linear(in_features = 128, out_features = vocab_size, bias = True)
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index=pad_id)
+
+        embedding_weights = tokenizer.get_vector(tokenizer.token_to_id)
+        embedding_size = embedding_weights.size(1)
         self.embedding = nn.Embedding.from_pretrained(
-            self.tokenizer.get_vector(self.tokenizer.TRAIN_VOCABULARY),
+            embedding_weights,
             freeze=True,
             padding_idx=pad_id,
         )
-
+        self.linear = nn.Linear(
+            in_features=embedding_size,
+            out_features=vocab_size,
+            bias=True,
+        )
         self.encoder = nn.GRU(
-            input_size=128,
-            hidden_size=128,
+            input_size=embedding_size,
+            hidden_size=embedding_size,
             batch_first=True,
         )
-
         self.decoder = nn.GRU(
-            input_size=128,
-            hidden_size=128,
+            input_size=embedding_size,
+            hidden_size=embedding_size,
             batch_first=True,
         )
-        
 
-    def forward(self, question_ids, decoder_input_ids, question_lengths):
+    def forward(
+        self,
+        question_ids: torch.Tensor,
+        decoder_input_ids: torch.Tensor,
+        question_lengths: torch.Tensor,
+    ) -> torch.Tensor:
         question_embedding = self.embedding(question_ids)
         decoder_embedding = self.embedding(decoder_input_ids)
 
@@ -47,116 +68,86 @@ class Train(L.LightningModule):
             question_embedding,
             question_lengths.cpu(),
             batch_first=True,
-            enforce_sorted=False
+            enforce_sorted=False,
         )
         _, encoder_hidden = self.encoder(packed_question)
-        decoder_output, _ = self.decoder(
-            decoder_embedding,
-            encoder_hidden,
-        )
-        logits = self.linear(decoder_output)
-        return logits
+        decoder_output, _ = self.decoder(decoder_embedding, encoder_hidden)
+        return self.linear(decoder_output)
 
-    def training_step(self, batch, batch_idx):
-        x,y,question_lengths = batch
-        if x.dtype != torch.long or y.dtype != torch.long:
-            raise TypeError("question_ids and answer_ids must use torch.long")
-        if x.min() < 0 or y.min() < 0:
-            raise ValueError("token IDs cannot be negative")
-        if x.max() >= self.embedding.num_embeddings:
-            raise ValueError("question token ID is outside the vocabulary")
-        if y.max() >= self.embedding.num_embeddings:
-            raise ValueError("answer token ID is outside the vocabulary")
-        # 标签分离
-        decoder_input_ids = y[:, :-1]
-        labels = y[:, 1:]
+    def training_step(
+        self,
+        batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        batch_idx: int,
+    ) -> torch.Tensor:
+        question_ids, answer_ids, question_lengths = batch
+        decoder_input_ids = answer_ids[:, :-1]
+        labels = answer_ids[:, 1:]
 
-        prediction = self(x, decoder_input_ids,question_lengths)
-        assert prediction.shape[:2] == labels.shape
-        assert prediction.size(-1) == self.linear.out_features
-        assert self.embedding.weight.shape == ((len(self.tokenizer.TRAIN_VOCABULARY)), 128), (
-            "Embedding矩阵形状不一致："
-            f"实际形状={tuple(self.embedding.weight.shape)}，"
-            f"预期形状=({len(self.tokenizer.TRAIN_VOCABULARY)}, 128)，"
-        )
-        
-        normal_loss = self.loss_fn(
-            prediction.reshape(-1, prediction.size(-1)),
+        logits = self(question_ids, decoder_input_ids, question_lengths)
+        loss = self.loss_fn(
+            logits.reshape(-1, logits.size(-1)),
             labels.reshape(-1),
         )
-        lr = self.optimizers().param_groups[0]['lr']
+        learning_rate = self.optimizers().param_groups[0]["lr"]
 
         self.log_dict(
             {
-                "normal_loss": normal_loss,
-                "lr" : lr
+                "normal_loss": loss,
+                "lr": learning_rate,
             },
             on_step=False,
             on_epoch=True,
             prog_bar=True,
             logger=True,
-            batch_size=x.size(0),
+            batch_size=question_ids.size(0),
         )
-
-        return normal_loss
+        return loss
 
     def configure_optimizers(self):
         return torch.optim.Adam(
-            params = self.parameters(),
-            lr = self.learning_rate,
+            params=self.parameters(),
+            lr=self.learning_rate,
         )
     
 
 
 
-class DataSet(Dataset):
-    def __init__(self,tokenizer: Tokenizer):
-        self.tokenizer = tokenizer
-        # 包含question and answer的问题.
-        # 用于提供给__getitem__进行q,v进行查询.
-        self.questions: list[str] = self.tokenizer.get_questions()
-        self.answers: list[str] = self.tokenizer.get_answers()
+class TrainingDataset(Dataset):
+    """Pre-encode every training pair once and batch the cached tensors."""
 
-    def __getitem__(self, key):
-        # 当前batch的question_ids and answer_ids.
-        # 调用tokenizer的方法获取token ID列表.
-        question_ids: list[int] = self.tokenizer.get_ids(self.questions[key])
-        answer_ids: list[int] = self.tokenizer.get_ids(self.answers[key])
-
-        feature =torch.tensor(
-                        question_ids,
-                        dtype=torch.long,
-                    )
-        
-        
-        target = torch.tensor(
-                        answer_ids,
-                        dtype=torch.long,
-                    )
-        
-        return feature,target
-    
-    def collate_fn(self, batch):
-        features, targets = zip(*batch)
-
-        organized_feature = pad_sequence(
-            features,
-            True,
-            self.tokenizer.SPECIAL_TOKEN["<PAD>"]
+    def __init__(self, tokenizer: Tokenizer):
+        self.pad_id = tokenizer.pad_id
+        self.examples = [
+            (
+                torch.tensor(tokenizer.get_ids(question), dtype=torch.long),
+                torch.tensor(tokenizer.get_ids(answer), dtype=torch.long),
             )
-        organized_target = pad_sequence(
-            targets,
-            True,
-            self.tokenizer.SPECIAL_TOKEN["<PAD>"]
-            )
+            for question, answer in tokenizer.data_provider.get_pairs()
+        ]
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.examples[index]
+
+    def collate_fn(
+        self,
+        batch: list[tuple[torch.Tensor, torch.Tensor]],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        question_ids, answer_ids = zip(*batch)
+        padded_question_ids = pad_sequence(
+            question_ids,
+            batch_first=True,
+            padding_value=self.pad_id,
+        )
+        padded_answer_ids = pad_sequence(
+            answer_ids,
+            batch_first=True,
+            padding_value=self.pad_id,
+        )
         question_lengths = torch.tensor(
-            [len(feature) for feature in features],
-            dtype=torch.int
+            [len(ids) for ids in question_ids],
+            dtype=torch.long,
         )
+        return padded_question_ids, padded_answer_ids, question_lengths
 
-        return organized_feature,organized_target,question_lengths
-
-    
-    def __len__(self):
-        return len(self.questions)
-    
+    def __len__(self) -> int:
+        return len(self.examples)

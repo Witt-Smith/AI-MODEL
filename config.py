@@ -1,13 +1,17 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_OUTPUT_DIR = PROJECT_ROOT / "runs"
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
     dataset_name: str = "silver/lccc"
+    dataset_config: Optional[str] = None
+    dialog_field: str = "dialog"
     max_dialogs: int = 10_000
     max_sequence_length: int = 64
     batch_size: int = 4
@@ -20,6 +24,12 @@ class TrainingConfig:
     gradient_clip_val: float = 1.0
 
     def validate(self) -> None:
+        if not self.dataset_name.strip():
+            raise ValueError("dataset_name cannot be empty")
+        if self.dataset_config is not None and not self.dataset_config.strip():
+            raise ValueError("dataset_config cannot be empty")
+        if not self.dialog_field.strip():
+            raise ValueError("dialog_field cannot be empty")
         if self.max_dialogs <= 0:
             raise ValueError("max_dialogs must be greater than 0")
         if self.max_sequence_length < 3:
@@ -42,7 +52,7 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class Config:
-    output_dir: Path = PROJECT_ROOT / "runs"
+    output_dir: Path = PROJECT_OUTPUT_DIR
     training: TrainingConfig = field(default_factory=TrainingConfig)
 
     @property
@@ -54,15 +64,18 @@ class Config:
         return self.output_dir / "logs"
 
     @property
+    def artifact_dir(self) -> Path:
+        return self.output_dir / "artifacts"
+
+    @property
     def vocabulary_path(self) -> Path:
-        return self.output_dir / "artifacts" / "vocabulary.json"
+        return self.artifact_dir / "vocabulary.json"
 
     @property
     def word2vec_path(self) -> Path:
-        return self.output_dir / "artifacts" / "word2vec.model"
+        return self.artifact_dir / "word2vec.model"
 
     def prepare(self) -> None:
         self.training.validate()
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.vocabulary_path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in (self.checkpoint_dir, self.log_dir, self.artifact_dir):
+            directory.mkdir(parents=True, exist_ok=True)

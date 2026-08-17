@@ -1,128 +1,163 @@
-from gensim.models import Word2Vec
-import torch
-from data_provider import DataProvider, LoadingMethod
-from sklearn.decomposition import PCA
-import matplotlib.pyplot as plt
-from numpy import ones
-import numpy as np
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-class WordVec():    
-    ''' A class for handling word vector operations '''
+import torch
+from gensim.models import Word2Vec
 
-    
+from data_provider import DataProvider
+
+
+class WordVec:
+    """Load or train the Word2Vec artifact used to initialise embeddings."""
+
+    VECTOR_SIZE = 128
+    MIN_COUNT = 2
+    EPOCHS = 1000
+
     def __init__(
         self,
         data_provider: DataProvider,
         model_path: Optional[Path] = None,
     ):
-        self.DATA_PROVIDER = data_provider
-        self.WORD2VEC_PATH = Path(model_path) if model_path is not None else None
-        if self.WORD2VEC_PATH is not None and self.WORD2VEC_PATH.is_file():
-            self.WORD2VEC = Word2Vec.load(str(self.WORD2VEC_PATH))
-        else:
-            self.WORD2VEC = Word2Vec(
-                self.DATA_PROVIDER.load_word_data(),
-                vector_size = 128,
-                min_count = 2,
-                workers = 1 ,
-                alpha = 0.002,
-                epochs = 20
-            )
-            if self.WORD2VEC_PATH is not None:
-                self.WORD2VEC_PATH.parent.mkdir(parents=True, exist_ok=True)
-                self.WORD2VEC.save(str(self.WORD2VEC_PATH))
-        if self.WORD2VEC.vector_size != 128:
+        self.data_provider = data_provider
+        self.model_path = model_path
+        self.word2vec = self._load_or_train_model()
+
+        if self.word2vec.vector_size != self.VECTOR_SIZE:
             raise ValueError(
-                f"Word2Vec vector size must be 128, got {self.WORD2VEC.vector_size}"
+                "Word2Vec vector size does not match the model embedding size: "
+                f"expected {self.VECTOR_SIZE}, got {self.word2vec.vector_size}"
             )
-        self.PCA = PCA(n_components = 2)
+        if not self.word2vec.wv.key_to_index:
+            raise ValueError("Word2Vec vocabulary is empty")
 
-    def train(self, train_file: str)-> None:
-        self.WORD2VEC.train(corpus_file = train_file)
+    def _load_or_train_model(self) -> Word2Vec:
+        if self.model_path is not None and self.model_path.is_file():
+            return Word2Vec.load(str(self.model_path))
 
-    def get_vector(self,vocabulary: dict[str, int]) -> torch.Tensor:
-        vector_size = self.WORD2VEC.vector_size
-        embedding_matrix = torch.empty(
-            len(vocabulary),
-            vector_size,
-            dtype=torch.float,
+        sentences = self.data_provider.load_word_data()
+        token_counts = Counter(token for sentence in sentences for token in sentence)
+        if not any(count >= self.MIN_COUNT for count in token_counts.values()):
+            raise ValueError(
+                "Word2Vec cannot build a vocabulary: no token appears at least "
+                f"{self.MIN_COUNT} times"
+            )
+
+        model = Word2Vec(
+            sentences,
+            vector_size=self.VECTOR_SIZE,
+            min_count=self.MIN_COUNT,
+            workers=1,
+            alpha=0.002,
+            epochs=self.EPOCHS,
         )
-        torch.nn.init.normal_(
-            embedding_matrix,
-            mean=0.0,
-            std=0.02,
+        if self.model_path is not None:
+            self.model_path.parent.mkdir(parents=True, exist_ok=True)
+            model.save(str(self.model_path))
+        return model
+
+    def train(self, train_file: str, epochs: int = EPOCHS) -> None:
+        if epochs <= 0:
+            raise ValueError("epochs must be greater than 0")
+        self.word2vec.train(
+            corpus_file=train_file,
+            total_words=self.word2vec.corpus_total_words,
+            epochs=epochs,
         )
-        pad_id = vocabulary["<PAD>"]
-        embedding_matrix[pad_id].zero_()
-        unk_id = vocabulary["<UNK>"]
-        word_vectors = torch.tensor(
-            self.WORD2VEC.wv.vectors,
-            dtype=torch.float,
-        )
-        embedding_matrix[unk_id] = word_vectors.mean(
-            dim=0
-        )
-        for token, token_id in vocabulary.items():
-            if token in self.WORD2VEC.wv.key_to_index:
-                embedding_matrix[token_id] = torch.tensor(
-                    self.WORD2VEC.wv[token],
-                    dtype=torch.float,
+        if self.model_path is not None:
+            self.word2vec.save(str(self.model_path))
+
+    def get_vector(self, vocabulary: dict[str, int]) -> torch.Tensor:
+        for required_token in ("<PAD>", "<UNK>"):
+            if required_token not in vocabulary:
+                raise ValueError(
+                    f"Vocabulary is missing required token {required_token}"
                 )
 
-        return embedding_matrix
-    
-    def semantic_map(self,*words: str)-> None:
-        ''' Show semantic map '''
-
-        self.all_points = self.PCA.fit_transform(
-            self.WORD2VEC.wv.get_normed_vectors()
+        keyed_vectors = self.word2vec.wv
+        embedding_matrix = torch.empty(
+            len(vocabulary), keyed_vectors.vector_size, dtype=torch.float
         )
-        self.words_points: list[int] = [self.WORD2VEC.wv.key_to_index[word] for word in words]
-        plt.figure(
-            figsize = (12.0,9.0),
+        torch.nn.init.normal_(embedding_matrix, mean=0.0, std=0.02)
+        embedding_matrix[vocabulary["<PAD>"]].zero_()
+
+        word_vectors = torch.from_numpy(keyed_vectors.vectors)
+        embedding_matrix[vocabulary["<UNK>"]] = word_vectors.mean(dim=0)
+
+        for token, token_id in vocabulary.items():
+            if token in keyed_vectors.key_to_index:
+                embedding_matrix[token_id] = torch.from_numpy(
+                    keyed_vectors[token].copy()
+                )
+        return embedding_matrix
+
+    def _require_known_words(self, words: tuple[str, ...]) -> None:
+        if not words:
+            raise ValueError("At least one word is required")
+        missing_words = [word for word in words if word not in self.word2vec.wv]
+        if missing_words:
+            raise KeyError(
+                f"Words are not in the Word2Vec vocabulary: {missing_words}"
+            )
+
+    def semantic_map(self, *words: str) -> None:
+        self._require_known_words(words)
+
+        import matplotlib.pyplot as plt
+        from sklearn.decomposition import PCA
+
+        keyed_vectors = self.word2vec.wv
+        all_points = PCA(n_components=2).fit_transform(
+            keyed_vectors.get_normed_vectors()
+        )
+        word_points = [keyed_vectors.key_to_index[word] for word in words] # type: ignore
+
+        plt.figure(figsize=(12.0, 9.0))
+        plt.scatter(
+            x=all_points[:, 0],
+            y=all_points[:, 1],
+            s=23,
+            alpha=0.01,
+            color="black",
         )
         plt.scatter(
-            x = self.all_points[:, 0],
-            y = self.all_points[:, 1],
-            s = 23,
-            alpha = 0.01,
-            color = "black"
-        )
-        plt.scatter (
-            x = self.all_points[self.words_points[0], 0],
-            y = self.all_points[self.words_points[0], 1],
-            s = 25,
-            alpha = 1,
-            color = "red"
+            x=all_points[word_points, 0],
+            y=all_points[word_points, 1],
+            s=25,
+            alpha=1,
+            color="red",
         )
         plt.show()
 
-
-    
-    
-    def most_similar(self, word: str, topn: int = 5)-> list[tuple[str, float]]:
-        return self.WORD2VEC.wv.most_similar(word, topn=topn)
+    def most_similar(self, word: str, topn: int = 5) -> list[tuple[str, float]]:
+        if topn <= 0:
+            raise ValueError("topn must be greater than 0")
+        return self.word2vec.wv.most_similar(word, topn=topn)
 
     def relationship_map(self, *words: str) -> None:
-        matrix = np.array([
+        self._require_known_words(words)
+
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        keyed_vectors = self.word2vec.wv
+        matrix = np.array(
             [
-                self.WORD2VEC.wv.similarity(word1, word2)
-                for word2 in words
+                [
+                    keyed_vectors.similarity(word1, word2)
+                    for word2 in words
+                ]
+                for word1 in words
             ]
-            for word1 in words
-        ])
+        )
 
         plt.rcParams["font.family"] = "Arial Unicode MS"
         plt.rcParams["axes.unicode_minus"] = False
-
         figure, axis = plt.subplots(figsize=(9, 7))
         image = axis.imshow(matrix, cmap="coolwarm", vmin=-1, vmax=1)
-
         axis.set_xticks(range(len(words)), labels=words, rotation=45)
         axis.set_yticks(range(len(words)), labels=words)
-
         axis.set_xlabel("对比词 word2")
         axis.set_ylabel("基准词 word1")
         axis.set_title("词语关系程度")
@@ -131,8 +166,7 @@ class WordVec():
             axis.text(
                 column,
                 row,
-                f"{words[row]} ↔ {words[column]}\n"
-                f"{matrix[row, column]:.2f}",
+                f"{words[row]} ↔ {words[column]}\n{matrix[row, column]:.2f}",
                 ha="center",
                 va="center",
             )
