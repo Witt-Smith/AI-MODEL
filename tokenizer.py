@@ -70,7 +70,7 @@ class Tokenizer(WordVec):
             vocabulary = dict(self.SPECIAL_TOKEN_IDS)
 
         if self.allow_vocabulary_updates:
-            for token in sorted(self.word2vec.wv.key_to_index):
+            for token in sorted(self.word2vec.wv.key_to_index): # type: ignore
                 if token not in vocabulary:
                     vocabulary[token] = len(vocabulary)
 
