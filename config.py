@@ -10,7 +10,7 @@ PROJECT_OUTPUT_DIR = PROJECT_ROOT / "runs"
 @dataclass(frozen=True)
 class TrainingConfig:
     dataset_name: str = "silver/lccc"
-    dataset_config: Optional[str] = None
+    dataset_config: Optional[str] = "base"
     dialog_field: str = "dialog"
     max_dialogs: int = 10_000
     max_sequence_length: int = 64

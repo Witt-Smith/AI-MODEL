@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
-from datasets import DatasetDict, load_dataset
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
 from jieba import cut
 
 
@@ -84,12 +84,15 @@ class DataProvider:
 
     @property
     def ds(self) -> DatasetDict:
+
         if self.is_local_dataset:
             raise TypeError(
                 "A local chat dataset is not a Hugging Face DatasetDict. "
                 "Use get_records() or get_pairs() instead."
             )
+
         if self._ds is None:
+
             if self.dataset_config is None:
                 loaded_dataset = load_dataset(self.dataset)
             else:
@@ -97,14 +100,47 @@ class DataProvider:
                     self.dataset,
                     self.dataset_config,
                 )
+
             if not isinstance(loaded_dataset, DatasetDict):
                 raise TypeError(
                     "Expected load_dataset() to return a DatasetDict, got "
                     f"{type(loaded_dataset).__name__}"
                 )
-            self._ds = loaded_dataset
-        return self._ds
 
+
+            # ==============================
+            # Add your own conversation data
+            # ==============================
+
+            custom_dataset = Dataset.from_dict(
+                {
+                    "question": [
+                        "你是谁?",
+                        "鸡你太美"
+                    ],
+                    "answer": [
+                        "我是Witt Smith开发的AI MODEL.",
+                        "哎呦你干嘛"
+                    ]
+                }
+            )
+
+
+            # only append to train split
+            if "train" in loaded_dataset:
+
+                loaded_dataset["train"] = concatenate_datasets(
+                    [
+                        loaded_dataset["train"],
+                        custom_dataset
+                    ]
+                )
+
+
+            self._ds = loaded_dataset
+
+
+        return self._ds
     @staticmethod
     def clean_turn(text: str) -> str:
         return "".join(str(text).split())
